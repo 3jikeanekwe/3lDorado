@@ -1,13 +1,12 @@
 {
-  "name": "casino-game-server",
+  "name": "3LDORADO",
   "version": "1.0.0",
-  "main": "index.js",
+  "description": "64-player skill game server",
+  "main": "server.js",
   "scripts": {
-    "start": "node index.js"
+    "start": "node server.js"
   },
   "dependencies": {
-    "cors": "^2.8.5",
-    "express": "^4.18.2",
-    "socket.io": "^4.7.2"
+    "ws": "^8.13.0"
   }
 }
