@@ -235,11 +235,99 @@ async function startGame(sessionId) {
   }
 }
 
-// End game function
+
+// End game function (continued)
 async function endGame(sessionId) {
   try {
     const session = await GameSession.findById(sessionId);
     if (!session) return;
 
     // Calculate rankings
-    const rankings = gameEngine.calculateR
+    const rankings = gameEngine.calculateRankings(sessionId);
+    
+    // Update session with winners (top 10)
+    session.winners = rankings.slice(0, 10);
+    session.status = 'completed';
+    session.endTime = new Date();
+    
+    // Update player rankings
+    session.players = session.players.map(player => {
+      const ranking = rankings.find(r => r.walletAddress === player.walletAddress);
+      return {
+        ...player,
+        rank: ranking ? ranking.rank : null,
+        score: ranking ? ranking.score : 0
+      };
+    });
+    
+    await session.save();
+
+    // Process payouts (if not free tier)
+    if (session.tier > 0) {
+      const payouts = await paymentService.releaseWinnerPayouts(session);
+      console.log('💰 Payouts processed:', payouts);
+    }
+
+    // Update user statistics
+    for (const player of session.players) {
+      await User.findOneAndUpdate(
+        { walletAddress: player.walletAddress },
+        {
+          $inc: { 
+            totalGamesPlayed: 1,
+            totalWinnings: player.rank <= 10 ? (session.prizePool * getPrizePercentage(player.rank)) : 0
+          },
+          $set: {
+            winRate: player.rank <= 10 ? 1 : 0 // This should be calculated properly
+          }
+        },
+        { upsert: true }
+      );
+    }
+
+    // Notify all players
+    io.to(sessionId).emit('game_ended', {
+      rankings,
+      winners: session.winners,
+      prizePool: session.prizePool
+    });
+
+    // Clean up game state
+    gameEngine.games.delete(sessionId);
+
+  } catch (error) {
+    console.error('Game end error:', error);
+  }
+}
+
+function getPrizePercentage(rank) {
+  const percentages = {
+    1: 0.40,
+    2: 0.25,
+    3: 0.15,
+    4: 0.20 / 7,
+    5: 0.20 / 7,
+    6: 0.20 / 7,
+    7: 0.20 / 7,
+    8: 0.20 / 7,
+    9: 0.20 / 7,
+    10: 0.20 / 7
+  };
+  return percentages[rank] || 0;
+}
+
+// Start server
+const PORT = process.env.PORT || 3001;
+httpServer.listen(PORT, () => {
+  console.log(`🚀 Server running on port ${PORT}`);
+  console.log(`🌐 Environment: ${process.env.NODE_ENV}`);
+});
+
+// Graceful shutdown
+process.on('SIGTERM', async () => {
+  console.log('🛑 SIGTERM received, shutting down gracefully');
+  httpServer.close(() => {
+    console.log('✅ Server closed');
+    process.exit(0);
+  });
+});
