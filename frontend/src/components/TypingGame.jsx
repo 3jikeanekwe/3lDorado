@@ -7,10 +7,8 @@ export default function TypingGame({ gameState, wallet }) {
   const inputRef = useRef(null);
 
   useEffect(() => {
-    // Focus input on mount
     inputRef.current?.focus();
 
-    // Listen for action results
     socketService.on('action_result', (result) => {
       if (result.success) {
         setMyScore(result.score);
