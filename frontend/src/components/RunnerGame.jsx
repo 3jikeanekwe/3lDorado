@@ -11,7 +11,6 @@ export default function RunnerGame({ gameState, wallet }) {
       }
     });
 
-    // Keyboard controls
     const handleKeyPress = (e) => {
       let action = null;
       if (e.key === 'ArrowUp' || e.key === ' ') action = 'jump';
@@ -27,7 +26,7 @@ export default function RunnerGame({ gameState, wallet }) {
 
     return () => {
       socketService.off('action_result');
-      window.removeEventListener('keydown', handleKeyPress');
+      window.removeEventListener('keydown', handleKeyPress);
     };
   }, []);
 
@@ -73,7 +72,6 @@ export default function RunnerGame({ gameState, wallet }) {
         </div>
 
         <div className="runner-track">
-          {/* Player */}
           <div 
             className="runner-player"
             style={{ 
@@ -83,7 +81,6 @@ export default function RunnerGame({ gameState, wallet }) {
             }}
           />
 
-          {/* Obstacles */}
           {gameState?.obstacles
             .filter(obs => Math.abs(obs.position - myDistance) < 200)
             .map((obs, idx) => (
@@ -110,6 +107,4 @@ export default function RunnerGame({ gameState, wallet }) {
       </div>
     </div>
   );
-}
-
-
+          }
