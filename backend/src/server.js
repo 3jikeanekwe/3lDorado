@@ -1,9 +1,11 @@
+// File: backend/src/server.js - TOURNAMENT VERSION
+
 import express from 'express';
 import { createServer } from 'http';
 import { Server } from 'socket.io';
 import cors from 'cors';
 import dotenv from 'dotenv';
-import sessionManager from './services/sessionManager.js';
+import tournamentManager from './services/tournamentManager.js';
 import gameEngine from './services/gameEngine.js';
 
 dotenv.config();
@@ -20,373 +22,355 @@ const io = new Server(httpServer, {
 app.use(cors());
 app.use(express.json());
 
-// ============= REST API ROUTES =============
+// ============= REST API =============
 
 app.get('/api/health', (req, res) => {
   res.json({ 
     status: 'ok', 
     timestamp: new Date(),
-    activeSessions: sessionManager.sessions.size,
+    activeTournaments: tournamentManager.tournaments.size,
     activeGames: gameEngine.games.size
   });
 });
 
-app.get('/api/lobbies/:gameType', (req, res) => {
+app.get('/api/tournaments/:gameType', (req, res) => {
   try {
     const { gameType } = req.params;
-    const lobbies = sessionManager.getWaitingLobbies(gameType);
-    res.json(lobbies);
+    const tournaments = [];
+    
+    for (const [id, tournament] of tournamentManager.tournaments) {
+      if (tournament.gameType === gameType && tournament.status === 'waiting') {
+        tournaments.push({
+          id,
+          tier: tournament.tier,
+          currentPlayers: tournament.players.length,
+          maxPlayers: tournament.maxPlayers,
+          status: tournament.status
+        });
+      }
+    }
+    
+    res.json(tournaments);
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
 });
 
-app.get('/api/stats', (req, res) => {
-  const stats = {
-    totalSessions: sessionManager.sessions.size,
-    activeGames: gameEngine.games.size,
-    connectedPlayers: io.sockets.sockets.size
-  };
-  res.json(stats);
-});
-
 // ============= WEBSOCKET HANDLERS =============
 
 io.on('connection', (socket) => {
-  console.log('🔌 Client connected:', socket.id);
+  console.log('🔌 Connected:', socket.id);
 
-  // JOIN LOBBY
-  socket.on('join_lobby', async (data) => {
+  // JOIN TOURNAMENT
+  socket.on('join_tournament', async (data) => {
     try {
       const { gameType, tier, walletAddress, username } = data;
 
-      // Find or create session
-      let session = sessionManager.findWaitingSession(gameType, tier, walletAddress);
+      // Find or create tournament
+      let tournament = tournamentManager.findWaitingTournament(gameType, tier, walletAddress);
       
-      if (!session) {
-        session = sessionManager.createSession(gameType, tier);
+      if (!tournament) {
+        tournament = tournamentManager.createTournament(gameType, tier);
       }
 
       // Add player
-      sessionManager.addPlayer(session.id, { walletAddress, username });
-      const updatedSession = sessionManager.getSession(session.id);
+      tournamentManager.addPlayer(tournament.id, { walletAddress, username });
+      const updated = tournamentManager.getTournament(tournament.id);
 
       // Join socket room
-      socket.join(session.id);
-      socket.data.sessionId = session.id;
+      socket.join(tournament.id);
+      socket.data.tournamentId = tournament.id;
       socket.data.walletAddress = walletAddress;
       socket.data.username = username;
 
-      console.log(`👤 ${username} joined session ${session.id} (${updatedSession.players.length}/${updatedSession.maxPlayers})`);
+      console.log(`👤 ${username} joined tournament ${tournament.id} (${updated.players.length}/64)`);
 
       // Notify player
-      socket.emit('lobby_joined', {
-        sessionId: session.id,
-        players: updatedSession.players,
-        currentPlayers: updatedSession.players.length,
-        maxPlayers: updatedSession.maxPlayers,
-        tier: updatedSession.tier
+      socket.emit('tournament_joined', {
+        tournamentId: tournament.id,
+        players: updated.players,
+        currentPlayers: updated.players.length,
+        maxPlayers: updated.maxPlayers,
+        tier: updated.tier,
+        totalPot: updated.totalPot,
+        netPot: updated.netPot
       });
 
-      // Notify all players in lobby
-      io.to(session.id).emit('lobby_updated', {
-        players: updatedSession.players,
-        currentPlayers: updatedSession.players.length,
-        maxPlayers: updatedSession.maxPlayers
+      // Notify all players
+      io.to(tournament.id).emit('tournament_updated', {
+        players: updated.players,
+        currentPlayers: updated.players.length,
+        maxPlayers: updated.maxPlayers,
+        totalPot: updated.totalPot,
+        netPot: updated.netPot
       });
 
-      // Start countdown if full
-      if (updatedSession.players.length === updatedSession.maxPlayers) {
-        console.log(`🎮 Session ${session.id} is full! Starting countdown...`);
+      // Start countdown if full (64 players)
+      if (updated.players.length === updated.maxPlayers) {
+        console.log(`🏆 Tournament ${tournament.id} FULL! Starting countdown...`);
         
-        io.to(session.id).emit('game_starting', {
-          countdown: 60 // 60 seconds
+        io.to(tournament.id).emit('tournament_starting', {
+          countdown: 60,
+          totalPot: updated.totalPot,
+          netPot: updated.netPot,
+          prizes: tournamentManager.calculatePrizeDistribution(updated.netPot)
         });
 
-        // Start game after countdown
+        // Start Round 1 after countdown
         setTimeout(() => {
-          startGame(session.id);
-        }, 60000); // 60 seconds
+          startRound(tournament.id, 1);
+        }, 60000);
       }
 
     } catch (error) {
-      console.error('Join lobby error:', error);
+      console.error('Join tournament error:', error);
       socket.emit('error', { message: error.message });
     }
   });
 
-  // LEAVE LOBBY
-  socket.on('leave_lobby', () => {
+  // LEAVE TOURNAMENT
+  socket.on('leave_tournament', () => {
     try {
-      const { sessionId, walletAddress } = socket.data;
-      if (!sessionId) return;
+      const { tournamentId, walletAddress } = socket.data;
+      if (!tournamentId) return;
 
-      console.log(`👋 ${socket.data.username} left session ${sessionId}`);
+      // Can only leave if tournament hasn't started
+      const tournament = tournamentManager.getTournament(tournamentId);
+      if (tournament && tournament.status === 'waiting') {
+        tournament.players = tournament.players.filter(p => p.walletAddress !== walletAddress);
+        socket.leave(tournamentId);
 
-      sessionManager.removePlayer(sessionId, walletAddress);
-      socket.leave(sessionId);
-
-      const session = sessionManager.getSession(sessionId);
-      if (session) {
-        io.to(sessionId).emit('lobby_updated', {
-          players: session.players,
-          currentPlayers: session.players.length
+        io.to(tournamentId).emit('tournament_updated', {
+          players: tournament.players,
+          currentPlayers: tournament.players.length
         });
       }
     } catch (error) {
-      console.error('Leave lobby error:', error);
+      console.error('Leave tournament error:', error);
     }
   });
 
   // GAME ACTION
   socket.on('game_action', (data) => {
     try {
-      const { sessionId, walletAddress } = socket.data;
-      const session = sessionManager.getSession(sessionId);
+      const { tournamentId, walletAddress } = socket.data;
+      const tournament = tournamentManager.getTournament(tournamentId);
       
-      if (!session || session.status !== 'active') return;
+      if (!tournament || !tournament.status.startsWith('round')) return;
 
+      // Process game action based on game type
       let result;
+      const sessionId = tournamentId; // Use tournament ID as session ID
 
-      switch(session.gameType) {
+      switch(tournament.gameType) {
         case 'typing':
           result = gameEngine.processTypingInput(sessionId, walletAddress, data.input);
           break;
-        
         case 'runner':
           result = gameEngine.processRunnerAction(sessionId, walletAddress, data.action);
           break;
-        
         case 'shooter':
           result = gameEngine.processShooterAction(sessionId, walletAddress, data.targetX, data.targetY);
           break;
-        
         case 'memory':
           result = gameEngine.processMemoryFlip(sessionId, walletAddress, data.cardId);
           break;
-        
         case 'math':
           result = gameEngine.processMathAnswer(sessionId, walletAddress, data.answer);
           break;
-        
         case 'reaction':
           result = gameEngine.processReactionClick(sessionId, walletAddress, data.x, data.y);
           break;
-        
         case 'snake':
           result = gameEngine.processSnakeMove(sessionId, walletAddress, data.direction);
           break;
-        
         case 'trivia':
           result = gameEngine.processTriviaAnswer(sessionId, walletAddress, data.answerIndex);
-          // Check if all players answered
-          const gameState = gameEngine.games.get(sessionId);
-          if (gameState.players.every(p => p.answered)) {
-            setTimeout(() => {
-              const hasMore = gameEngine.nextTriviaQuestion(sessionId);
-              if (!hasMore) {
-                endGame(sessionId);
-              } else {
-                io.to(sessionId).emit('next_question', gameEngine.games.get(sessionId));
-              }
-            }, 2000);
-          }
           break;
       }
 
-      // Send result to player
       if (result) {
         socket.emit('action_result', result);
       }
 
-      // Broadcast updated game state
+      // Broadcast game state
       const gameState = gameEngine.games.get(sessionId);
       if (gameState) {
-        io.to(sessionId).emit('game_state_update', gameState);
+        io.to(tournamentId).emit('game_state_update', gameState);
       }
 
     } catch (error) {
       console.error('Game action error:', error);
-      socket.emit('error', { message: error.message });
     }
   });
 
   // DISCONNECT
   socket.on('disconnect', () => {
-    console.log('🔌 Client disconnected:', socket.id);
-    
-    const { sessionId, walletAddress, username } = socket.data;
-    if (sessionId && walletAddress) {
-      console.log(`👋 ${username} disconnected from session ${sessionId}`);
-      sessionManager.removePlayer(sessionId, walletAddress);
-      
-      const session = sessionManager.getSession(sessionId);
-      if (session) {
-        io.to(sessionId).emit('lobby_updated', {
-          players: session.players,
-          currentPlayers: session.players.length
-        });
-      }
-    }
+    console.log('🔌 Disconnected:', socket.id);
   });
 });
 
-// ============= GAME LIFECYCLE FUNCTIONS =============
+// ============= TOURNAMENT LIFECYCLE =============
 
-function startGame(sessionId) {
+function startRound(tournamentId, roundNumber) {
   try {
-    const session = sessionManager.getSession(sessionId);
-    if (!session) return;
+    const tournament = tournamentManager.getTournament(tournamentId);
+    if (!tournament) return;
 
-    console.log(`🎮 Starting game: ${session.gameType} (Session: ${sessionId})`);
+    const round = tournamentManager.startRound(tournamentId, roundNumber);
+    const activePlayers = tournamentManager.getActivePlayers(tournamentId);
 
-    // Update session status
-    sessionManager.updateSessionStatus(sessionId, 'active');
+    console.log(`🎮 Round ${roundNumber}: "${round.name}" starting with ${activePlayers.length} players`);
 
-    // Initialize game based on type
+    // Initialize game for this round
     let gameState;
-    switch(session.gameType) {
+    switch(tournament.gameType) {
       case 'typing':
-        gameState = gameEngine.initTypingGame(sessionId, session.players);
+        gameState = gameEngine.initTypingGame(tournamentId, activePlayers);
         break;
       case 'runner':
-        gameState = gameEngine.initRunnerGame(sessionId, session.players);
-        // Auto-move players every 100ms
-        const runnerInterval = setInterval(() => {
-          const gs = gameEngine.games.get(sessionId);
-          if (!gs) {
-            clearInterval(runnerInterval);
-            return;
-          }
-          gs.players.forEach(p => {
-            if (!p.isEliminated) {
-              gameEngine.processRunnerAction(sessionId, p.walletAddress, 'run');
-            }
-          });
-          io.to(sessionId).emit('game_state_update', gs);
-        }, 100);
+        gameState = gameEngine.initRunnerGame(tournamentId, activePlayers);
         break;
       case 'shooter':
-        gameState = gameEngine.initShooterGame(sessionId, session.players);
+        gameState = gameEngine.initShooterGame(tournamentId, activePlayers);
         break;
       case 'memory':
-        gameState = gameEngine.initMemoryGame(sessionId, session.players);
+        gameState = gameEngine.initMemoryGame(tournamentId, activePlayers);
         break;
       case 'math':
-        gameState = gameEngine.initMathGame(sessionId, session.players);
+        gameState = gameEngine.initMathGame(tournamentId, activePlayers);
         break;
       case 'reaction':
-        gameState = gameEngine.initReactionGame(sessionId, session.players);
+        gameState = gameEngine.initReactionGame(tournamentId, activePlayers);
         break;
       case 'snake':
-        gameState = gameEngine.initSnakeGame(sessionId, session.players);
-        // Auto-move snakes every 200ms
-        const snakeInterval = setInterval(() => {
-          const gs = gameEngine.games.get(sessionId);
-          if (!gs) {
-            clearInterval(snakeInterval);
-            return;
-          }
-          gs.players.forEach(p => {
-            if (!p.isEliminated) {
-              gameEngine.processSnakeMove(sessionId, p.walletAddress, p.direction);
-            }
-          });
-          io.to(sessionId).emit('game_state_update', gs);
-        }, 200);
+        gameState = gameEngine.initSnakeGame(tournamentId, activePlayers);
         break;
       case 'trivia':
-        gameState = gameEngine.initTriviaGame(sessionId, session.players);
+        gameState = gameEngine.initTriviaGame(tournamentId, activePlayers);
         break;
     }
 
     // Notify players
-    io.to(sessionId).emit('game_started', {
-      gameType: session.gameType,
-      tier: session.tier,
+    io.to(tournamentId).emit('round_started', {
+      roundNumber,
+      roundName: round.name,
+      playersInRound: activePlayers.length,
+      survivorsNeeded: round.survivors,
       gameState
     });
 
-    // Set game duration (5 minutes for most games)
-    const duration = session.gameType === 'trivia' ? 300000 : 300000; // 5 minutes
+    // Set round duration (3 minutes per round)
     setTimeout(() => {
-      endGame(sessionId);
-    }, duration);
+      endRound(tournamentId, roundNumber);
+    }, 180000); // 3 minutes
 
   } catch (error) {
-    console.error('Start game error:', error);
+    console.error('Start round error:', error);
   }
 }
 
-function endGame(sessionId) {
+function endRound(tournamentId, roundNumber) {
   try {
-    const session = sessionManager.getSession(sessionId);
-    if (!session) return;
+    const tournament = tournamentManager.getTournament(tournamentId);
+    if (!tournament) return;
 
-    console.log(`🏁 Ending game: ${session.gameType} (Session: ${sessionId})`);
+    console.log(`🏁 Ending Round ${roundNumber} for tournament ${tournamentId}`);
 
-    // Calculate rankings
-    const rankings = gameEngine.calculateRankings(sessionId);
-    
-    // Update session
-    session.winners = rankings.slice(0, 10);
-    sessionManager.updateSessionStatus(sessionId, 'completed');
+    // Get player scores from game engine
+    const gameState = gameEngine.games.get(tournamentId);
+    if (!gameState) return;
 
-    // Update players with final scores from game engine
-    const gameState = gameEngine.games.get(sessionId);
-    if (gameState) {
-      session.players = gameState.players.map(gp => {
-        const sp = session.players.find(p => p.walletAddress === gp.walletAddress);
-        return {
-          ...sp,
-          score: gp.score,
-          rank: rankings.find(r => r.walletAddress === gp.walletAddress)?.rank
-        };
-      });
-    }
+    const playerScores = gameState.players.map(p => ({
+      walletAddress: p.walletAddress,
+      score: p.score || 0
+    }));
 
-    console.log(`🏆 Winners:`, rankings.slice(0, 3).map(r => `${r.username} (${r.score})`));
+    // Process round results
+    const results = tournamentManager.processRoundResults(tournamentId, roundNumber, playerScores);
 
-    // Notify all players
-    io.to(sessionId).emit('game_ended', {
-      rankings,
-      winners: session.winners,
-      tier: session.tier,
-      totalPlayers: session.players.length
+    // Notify players
+    io.to(tournamentId).emit('round_ended', {
+      roundNumber,
+      survivors: results.survivors.map(s => ({
+        walletAddress: s.walletAddress,
+        username: s.username,
+        score: s.roundScores[`round${roundNumber}`]
+      })),
+      eliminated: results.eliminated.map(e => ({
+        walletAddress: e.walletAddress,
+        username: e.username,
+        score: e.roundScores[`round${roundNumber}`]
+      })),
+      results: results.results
     });
 
     // Clean up game state
-    gameEngine.games.delete(sessionId);
+    gameEngine.games.delete(tournamentId);
 
-    // Schedule session cleanup after 10 minutes
-    setTimeout(() => {
-      sessionManager.sessions.delete(sessionId);
-      console.log(`🧹 Cleaned up session: ${sessionId}`);
-    }, 600000); // 10 minutes
+    // Check if there are more rounds
+    if (roundNumber < 3) {
+      // Wait 30 seconds before next round
+      setTimeout(() => {
+        io.to(tournamentId).emit('next_round_countdown', {
+          nextRound: roundNumber + 1,
+          countdown: 30
+        });
+      }, 5000);
+
+      setTimeout(() => {
+        startRound(tournamentId, roundNumber + 1);
+      }, 35000);
+    } else {
+      // Tournament complete - finalize and pay winners
+      setTimeout(() => {
+        finalizeTournament(tournamentId);
+      }, 5000);
+    }
 
   } catch (error) {
-    console.error('End game error:', error);
+    console.error('End round error:', error);
   }
 }
 
-// ============= CLEANUP & START SERVER =============
+function finalizeTournament(tournamentId) {
+  try {
+    const winners = tournamentManager.finalizeTournament(tournamentId);
+    const tournament = tournamentManager.getTournament(tournamentId);
 
-// Cleanup old sessions every hour
+    console.log(`🏆 Tournament ${tournamentId} COMPLETE!`);
+
+    // Notify all players
+    io.to(tournamentId).emit('tournament_completed', {
+      winners,
+      totalPot: tournament.totalPot,
+      netPot: tournament.netPot,
+      platformFee: tournament.platformFee
+    });
+
+    // TODO: Call Softkoin API to process payouts
+    // For each winner, call: POST /api/escrow/release
+
+  } catch (error) {
+    console.error('Finalize tournament error:', error);
+  }
+}
+
+// ============= CLEANUP & START =============
+
 setInterval(() => {
-  sessionManager.cleanupOldSessions();
+  tournamentManager.cleanupOldTournaments();
 }, 3600000);
 
-// Start server
 const PORT = process.env.PORT || 3001;
 httpServer.listen(PORT, () => {
-  console.log(`🚀 Server running on port ${PORT}`);
-  console.log(`🌐 Environment: ${process.env.NODE_ENV}`);
-  console.log(`📦 No database - all in memory!`);
+  console.log(`🚀 Tournament Server running on port ${PORT}`);
+  console.log(`🏆 3-Round Elimination System`);
+  console.log(`📦 No database required`);
 });
 
-// Graceful shutdown
 process.on('SIGTERM', () => {
-  console.log('🛑 SIGTERM received, shutting down gracefully');
+  console.log('🛑 Shutting down...');
   httpServer.close(() => {
     console.log('✅ Server closed');
     process.exit(0);
