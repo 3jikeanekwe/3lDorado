@@ -1,9 +1,8 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect } from 'react';
 import socketService from '../services/socket';
 
 export default function ShooterGame({ gameState, wallet }) {
   const [myScore, setMyScore] = useState(0);
-  const canvasRef = useRef(null);
   const [mousePos, setMousePos] = useState({ x: 0, y: 0 });
 
   useEffect(() => {
@@ -61,12 +60,10 @@ export default function ShooterGame({ gameState, wallet }) {
 
       <div className="game-canvas">
         <div
-          ref={canvasRef}
           className="shooter-arena"
           onMouseMove={handleMouseMove}
           onClick={handleClick}
         >
-          {/* Crosshair */}
           <div
             style={{
               position: 'absolute',
@@ -81,7 +78,6 @@ export default function ShooterGame({ gameState, wallet }) {
             }}
           />
 
-          {/* Targets */}
           {gameState?.targets.map((target, idx) => (
             <div
               key={idx}
@@ -93,7 +89,6 @@ export default function ShooterGame({ gameState, wallet }) {
             />
           ))}
 
-          {/* Instructions */}
           <div style={{
             position: 'absolute',
             top: '20px',
@@ -137,4 +132,4 @@ export default function ShooterGame({ gameState, wallet }) {
       </div>
     </div>
   );
-}
+      }
